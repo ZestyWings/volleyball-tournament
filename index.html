@@ -102,6 +102,19 @@
     <h1>Volleyball Tournament Manager</h1>
     <p class="muted">Vanilla HTML + JS. Team check-in, pool scheduling, scoring, standings, and a 10-seed elimination bracket (1 and 2 get byes). Five-round mode adds a no-score “Bye game” row each round.</p>
 
+    <!-- Session persistence -->
+    <section class="card" id="sessionCard">
+      <h2>Session</h2>
+      <div class="row">
+        <button id="exportBtn" type="button">Export JSON</button>
+        <input id="importFile" type="file" accept="application/json" style="display:none" />
+        <button id="importBtn" type="button" class="secondary">Import JSON</button>
+        <button id="freshBtn" type="button" class="secondary">Start fresh</button>
+        <span class="pill ok" id="autosaveBadge">Autosave: ON</span>
+        <span class="muted tiny">(Restores automatically on this device/browser)</span>
+      </div>
+    </section>
+
     <!-- Team Registration & Check in -->
     <section class="card" id="teamsCard">
       <h2>1) Team Registration & Check in</h2>
@@ -158,7 +171,7 @@
       <div id="bracket"></div>
       <div id="champion" class="center" style="margin-top:12px;"></div>
       <div class="note tiny" style="margin-top:12px;">
-        Tip: reload the page to start fresh. Data is kept in memory only.
+        Tip: reload the page to restore your last session automatically.
       </div>
     </section>
 
@@ -185,6 +198,27 @@
 
 <script>
 "use strict";
+/*****************************
+ * Persistence (localStorage)
+ *****************************/
+var STORAGE_KEY = 'vtm_state_v1';
+function persist(){
+  try{
+    var payload = { state: state, nextTeamId: nextTeamId };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }catch(e){ console.warn('Persist failed', e); }
+}
+function loadPersisted(){
+  try{
+    var raw = localStorage.getItem(STORAGE_KEY); if(!raw) return false;
+    var data = JSON.parse(raw);
+    if(!data || !data.state) return false;
+    state = data.state; nextTeamId = data.nextTeamId || 1;
+    return true;
+  }catch(e){ console.warn('Load failed', e); return false; }
+}
+function clearPersisted(){ try{ localStorage.removeItem(STORAGE_KEY); }catch(e){} }
+
 /*****************************
  * State
  *****************************/
@@ -225,10 +259,10 @@ function addTeam(name){
   if(!name) return;
   if(state.teams.length >= 12){ alert('Max 12 teams.'); return; }
   state.teams.push({ id: nextTeamId++, name: String(name).trim(), checked: false, wins: 0, diff: 0 });
-  renderTeams();
+  renderTeams(); persist();
 }
-function removeTeam(id){ state.teams = state.teams.filter(function(t){return t.id!==id;}); renderTeams(); }
-function toggleCheck(id){ var t=state.teams.find(function(x){return x.id===id;}); if(t){ t.checked = !t.checked; renderTeams(); } }
+function removeTeam(id){ state.teams = state.teams.filter(function(t){return t.id!==id;}); renderTeams(); persist(); }
+function toggleCheck(id){ var t=state.teams.find(function(x){return x.id===id;}); if(t){ t.checked = !t.checked; renderTeams(); persist(); } }
 function renderTeams(){
   var tbody = el('#teamsTable tbody');
   tbody.innerHTML = '';
@@ -312,6 +346,7 @@ function createSchedule(roundCount){
   renderSchedule();
   renderStandings();
   el('#finalizePool').disabled = false;
+  persist();
 }
 
 function renderSchedule(){
@@ -363,7 +398,7 @@ function renderSchedule(){
     });
 
     var saveRoundBtn = create('button', { id:'saveRound-'+r.round }, 'Save Round ' + r.round);
-    saveRoundBtn.addEventListener('click', function(){ saveRound(r.round); });
+    saveRoundBtn.addEventListener('click', function(){ saveRound(r.round); persist(); });
     wrap.appendChild(saveRoundBtn);
 
     holder.appendChild(wrap);
@@ -450,6 +485,7 @@ function saveRound(roundNo){
   recomputeStandings();
   renderStandings();
   renderSchedule();
+  persist();
 }
 
 function recomputeStandings(){
@@ -503,6 +539,7 @@ function finalizePool(){
   state.rankings = state.standings.map(function(s){return s.id;});
   alert('Pool complete. Rankings locked. You can now build the bracket.');
   el('#buildBracket').disabled = false;
+  persist();
 }
 
 /*****************************
@@ -531,6 +568,7 @@ function buildBracketFromRankings(){
     final:{ id:'F', a:{from:'S1'}, b:{from:'S2'}, aScore:'', bScore:'', winner:null, sets:[{a:'',b:''},{a:'',b:''},{a:'',b:''}] }
   };
   renderBracket();
+  persist();
 }
 
 function resolveEntry(entry){
@@ -564,6 +602,7 @@ function recordBracketScore(stage, idx, aVal, bVal){
   else if(a===b) return alert('No ties in elimination.');
   else m.winner = a>b ? getEntryId(m.a) : getEntryId(m.b);
   renderBracket();
+  persist();
 }
 
 function recordFinalSets(a1,b1,a2,b2,a3,b3){
@@ -585,6 +624,7 @@ function recordFinalSets(a1,b1,a2,b2,a3,b3){
   m.sets = [{a:A[0],b:B[0]},{a:A[1],b:B[1]},{a:A[2],b:B[2]}];
   renderBracket();
   if(m.winner){ el('#champion').innerHTML = '<h2>Champion: <span class="winner">'+teamName(m.winner)+'</span></h2>'; }
+  persist();
 }
 
 function renderBracket(){
@@ -640,9 +680,30 @@ function renderBracket(){
 }
 
 /*****************************
- * Wire up UI
+ * Wire up UI & Session controls
  *****************************/
 document.addEventListener('DOMContentLoaded', function(){
+  // load last session if present
+  if(loadPersisted()){
+    renderTeams(); renderSchedule(); renderStandings(); renderBracket();
+  }
+
+  // Export / Import / Start fresh
+  el('#exportBtn').addEventListener('click', function(){
+    var blob = new Blob([localStorage.getItem(STORAGE_KEY) || JSON.stringify({state, nextTeamId})], {type:'application/json'});
+    var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'vtm-session.json'; a.click(); setTimeout(function(){URL.revokeObjectURL(a.href);}, 1000);
+  });
+  el('#importBtn').addEventListener('click', function(){ el('#importFile').click(); });
+  el('#importFile').addEventListener('change', function(e){
+    var f = e.target.files && e.target.files[0]; if(!f) return;
+    var reader = new FileReader(); reader.onload = function(){
+      try{ var data = JSON.parse(String(reader.result)); if(!data || !data.state) throw new Error('Bad file');
+        state = data.state; nextTeamId = data.nextTeamId || 1; persist(); renderTeams(); renderSchedule(); renderStandings(); renderBracket();
+      }catch(err){ alert('Invalid JSON.'); }
+    }; reader.readAsText(f);
+  });
+  el('#freshBtn').addEventListener('click', function(){ if(!confirm('Start fresh? This clears the saved session.')) return; clearPersisted(); location.reload(); });
+
   // Team form submit handles both Enter and the Add Team button
   el('#teamForm').addEventListener('submit', function(e){
     e.preventDefault();
@@ -653,17 +714,17 @@ document.addEventListener('DOMContentLoaded', function(){
     if(!confirm('Remove all teams?')) return;
     state.teams=[]; nextTeamId=1; state.schedule=[]; state.standings=[]; state.rankings=[]; state.bracket=null;
     renderTeams(); el('#poolSchedule').innerHTML=''; el('#standings').innerHTML=''; el('#bracket').innerHTML=''; el('#champion').innerHTML='';
-    el('#buildBracket').disabled=true; el('#finalizePool').disabled=true;
+    el('#buildBracket').disabled=true; el('#finalizePool').disabled=true; persist();
   });
 
   // Pool controls
   el('#makeSchedule').addEventListener('click', function(){ var rounds=parseInt(el('#roundCount').value,10); createSchedule(rounds); });
-  el('#resetSchedule').addEventListener('click', function(){ state.schedule=[]; state.standings=[]; state.rankings=[]; el('#poolSchedule').innerHTML=''; el('#standings').innerHTML=''; el('#finalizePool').disabled=true; el('#buildBracket').disabled=true; });
+  el('#resetSchedule').addEventListener('click', function(){ state.schedule=[]; state.standings=[]; state.rankings=[]; el('#poolSchedule').innerHTML=''; el('#standings').innerHTML=''; el('#finalizePool').disabled=true; el('#buildBracket').disabled=true; persist(); });
   el('#finalizePool').addEventListener('click', finalizePool);
 
   // Bracket controls
   el('#buildBracket').addEventListener('click', buildBracketFromRankings);
-  el('#resetBracket').addEventListener('click', function(){ state.bracket=null; el('#bracket').innerHTML=''; el('#champion').innerHTML=''; });
+  el('#resetBracket').addEventListener('click', function(){ state.bracket=null; el('#bracket').innerHTML=''; el('#champion').innerHTML=''; persist(); });
 
   // Tests
   el('#runTests').addEventListener('click', runTests);
@@ -678,7 +739,7 @@ function logResult(msg, ok){
   line.textContent = (ok? 'PASS: ' : 'FAIL: ') + msg; el('#testResults').appendChild(line);
   (ok? console.log : console.error)(line.textContent);
 }
-function resetAll(){ state.teams=[]; nextTeamId=1; state.schedule=[]; state.standings=[]; state.rankings=[]; state.bracket=null; renderTeams(); el('#poolSchedule').innerHTML=''; el('#standings').innerHTML=''; el('#bracket').innerHTML=''; el('#champion').innerHTML=''; el('#buildBracket').disabled=true; el('#finalizePool').disabled=true; el('#testResults').innerHTML=''; }
+function resetAll(){ state.teams=[]; nextTeamId=1; state.schedule=[]; state.standings=[]; state.rankings=[]; state.bracket=null; renderTeams(); el('#poolSchedule').innerHTML=''; el('#standings').innerHTML=''; el('#bracket').innerHTML=''; el('#champion').innerHTML=''; el('#buildBracket').disabled=true; el('#finalizePool').disabled=true; el('#testResults').innerHTML=''; clearPersisted(); }
 function runTests(){
   resetAll();
   // Enter/submit adds a team
@@ -767,28 +828,45 @@ function runTests(){
   fill(2,1,state.teams[2].id,state.teams[3].id);
   fill(2,2,state.teams[4].id,state.teams[5].id);
   fill(2,3,state.teams[6].id,state.teams[7].id);
-  var rematchBlocked=false; var prevAlert2 = window.alert; window.alert=function(m){ if(String(m).includes('Rematch detected')) rematchBlocked=true; };
-  saveRound(2); window.alert=prevAlert2;
+  var rematchBlocked=false; 
+  var prevAlert2 = window.alert; 
+  window.alert=function(m){ if(String(m).includes('Rematch detected')) rematchBlocked=true; };
+  saveRound(2); 
+  window.alert=prevAlert2;
   logResult('Rematch prevention enforced across rounds', rematchBlocked===true);
 
-  // Fast-forward to bracket and test best-of-3 final
-  for(var rIdx=0; rIdx<state.schedule.length; rIdx++){
-    var round = state.schedule[rIdx];
-    for(var mIdx=0; mIdx<round.matches.length; mIdx++){
-      var m = round.matches[mIdx];
-      if(m.isBye) continue;
-      if(m.a==null){ // ensure teams selected for manual
-        el('#aSel-'+(rIdx+1)+'-'+mIdx).value = String(state.teams[(mIdx*2)%state.teams.length].id);
-        el('#bSel-'+(rIdx+1)+'-'+mIdx).value = String(state.teams[(mIdx*2+1)%state.teams.length].id);
-      }
-      el('#aScore-'+(rIdx+1)+'-'+mIdx).value='21'; el('#bScore-'+(rIdx+1)+'-'+mIdx).value='19';
-    }
-    saveRound(rIdx+1);
+  // Reset to auto-schedule so we can complete bracket tests cleanly
+  resetAll(); 
+  ['A','B','C','D','E','F','G','H','I','J'].forEach(function(n){ addTeam(n); });
+  el('#manualMode').checked = false; 
+  createSchedule(4);
+
+  // Save all rounds with simple scores
+  state.schedule.forEach(function(r){
+    r.matches.forEach(function(m, mi){
+      if(m.isBye) return; 
+      el('#aScore-'+r.round+'-'+mi).value='21'; 
+      el('#bScore-'+r.round+'-'+mi).value='19';
+    });
+    saveRound(r.round);
+  });
+
+  finalizePool(); 
+  buildBracketFromRankings();
+
+  // Advance play-ins, quarters, semis with simple scores
+  function simpleAdvance(list, key){
+    list.forEach(function(mm, i){ 
+      if(mm.winner) return; 
+      recordBracketScore(key, i, 21, 19); 
+    });
   }
-  finalizePool(); buildBracketFromRankings();
-  function simpleAdvance(list, key){ list.forEach(function(mm, i){ if(mm.winner) return; recordBracketScore(key, i, 21, 19); }); }
-  simpleAdvance(state.bracket.playins,'playins'); simpleAdvance(state.bracket.quarters,'quarters'); simpleAdvance(state.bracket.semis,'semis');
+  simpleAdvance(state.bracket.playins,'playins'); 
+  simpleAdvance(state.bracket.quarters,'quarters'); 
+  simpleAdvance(state.bracket.semis,'semis');
   renderBracket();
+
+  // Final best-of-3: set scores (2-0)
   var finalCol = el('#bracket');
   var inputs = finalCol.querySelectorAll('.bracket-col:last-child input');
   inputs[0].value='25'; inputs[1].value='22'; // Set 1
