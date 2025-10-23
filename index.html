@@ -100,7 +100,7 @@
 <body>
   <div class="wrap">
     <h1>Volleyball Tournament Manager</h1>
-    <p class="muted">Vanilla HTML + JS. Team check-in, pool scheduling, scoring, standings, and a 10-seed elimination bracket (1 and 2 get byes). Five-round mode adds a no-score “Bye game” row each round.</p>
+    <p class="muted">Vanilla HTML + JS. Team check-in, pool scheduling, scoring, standings, and a 10-seed elimination bracket (1 and 2 get byes). Pool rounds now auto‑match the number of teams: 8→4 rounds/4 games, 10→5 rounds/4 games + Bye row, 12→4 rounds/6 games.</p>
 
     <!-- Session persistence -->
     <section class="card" id="sessionCard">
@@ -139,8 +139,8 @@
     <section class="card" id="poolCard">
       <h2>2) Pool Play</h2>
       <div class="row" style="flex-wrap:wrap; gap:12px;">
-        <label>Rounds:
-          <select id="roundCount">
+        <label style="display:none">Rounds:
+          <select id="roundCount" disabled>
             <option value="4">4</option>
             <option value="5">5</option>
           </select>
@@ -305,23 +305,71 @@ function roundRobinPairings(teamIds){
   return rounds;
 }
 
-function createSchedule(roundCount){
+// Determine rounds & matches per round from team count.
+function computeFormat(teamCount){
+  if(teamCount===8) return { rounds:4, matchesPerRound:4, includeBye:false };
+  if(teamCount===10) return { rounds:5, matchesPerRound:4, includeBye:true };// two teams rest per round via Bye row
+  if(teamCount===12) return { rounds:4, matchesPerRound:6, includeBye:false };
+  return null; // unsupported
+}
+
+function createSchedule(roundCount){ // roundCount optional; when omitted we auto-pick from team count
   var poolTeams = state.teams.filter(function(t){return t.checked;});
   if(poolTeams.length===0) poolTeams = state.teams.slice();
   if(poolTeams.length < 2){ alert('Need at least 2 teams.'); return; }
   var ids = poolTeams.map(function(t){return t.id;});
   var manual = el('#manualMode').checked;
 
+  var fmt = computeFormat(poolTeams.length);
+  var autoMode = !roundCount && fmt;
+  // Enforce supported team counts when auto mode is used
+  if(!roundCount && !fmt){
+    alert('For now, only 8, 10, or 12 teams are supported for auto scheduling. You currently have '+poolTeams.length+'.');
+    return;
+  }
+  var roundsToMake = autoMode ? fmt.rounds : roundCount;
+  var matchesPerRound = autoMode ? fmt.matchesPerRound : 4; // legacy default for tests
+  var includeBye = autoMode ? fmt.includeBye : (roundCount===5);
+
   if(!manual){
-    var rr = roundRobinPairings(ids).slice(0, roundCount);
+  var rrAll = roundRobinPairings(ids); // full RR, 5 pairings per round for 10 teams
+
+  // Special path: auto mode, exactly 10 teams -> ensure 2 byes every round (pre-filled),
+  // by dropping one pairing per round (rotating which one).
+  if (autoMode && includeBye && ids.length === 10) {
+    state.schedule = [];
+    for (var rIdx = 0; rIdx < roundsToMake; rIdx++) {
+      var pairings = rrAll[rIdx];           // 5 matches covering all 10 teams
+      var dropIdx  = rIdx % pairings.length; // rotate which pairing becomes the byes
+      var byePair  = pairings[dropIdx];     // [teamA, teamB] who rest this round
+
+      // Keep the other 4 matches
+      var kept = pairings
+        .filter(function(_, i){ return i !== dropIdx; })
+        .slice(0, matchesPerRound)
+        .map(function(p){
+          return { a:p[0], b:p[1], aScore:'', bScore:'', winnerId:null, diff:0, played:false };
+        });
+
+      var roundObj = {
+        round: rIdx+1,
+        matches: kept.concat([{ isBye:true, a:'BYE', b:'BYE', aScore:'', bScore:'', winnerId:null, diff:0, played:true }]),
+        bye: { a: byePair[0], b: byePair[1] } // pre-fill the two resting teams
+      };
+      state.schedule.push(roundObj);
+    }
+  } else {
+    // Default behavior (8 or 12 teams, or manual roundCount=5 test case etc.)
+    var rr = rrAll.slice(0, roundsToMake);
     state.schedule = rr.map(function(pairings, idx){
       return { round: idx+1,
-        matches: pairings.slice(0, 4).map(function(p){ return { a:p[0], b:p[1], aScore:'', bScore:'', winnerId:null, diff:0, played:false }; }),
+        matches: pairings.slice(0, matchesPerRound).map(function(p){ return { a:p[0], b:p[1], aScore:'', bScore:'', winnerId:null, diff:0, played:false }; }),
         bye: null };
     });
-  } else {
-    var matchesPerRound = 4; // manual mode: exactly 4 matches per round
-    state.schedule = Array.from({length: roundCount}, function(_,r){
+  }
+} else {
+
+    state.schedule = Array.from({length: roundsToMake}, function(_,r){
       return { round: r+1,
         matches: Array.from({length: matchesPerRound}, function(){ return { a:null, b:null, aScore:'', bScore:'', winnerId:null, diff:0, played:false }; }),
         bye: null };
@@ -329,19 +377,24 @@ function createSchedule(roundCount){
   }
 
   state.schedule.forEach(function(r){
-    if(r.matches.length > 4) r.matches = r.matches.slice(0,4);
-    while(r.matches.length < 4){ r.matches.push({ a:null, b:null, aScore:'', bScore:'', winnerId:null, diff:0, played:false }); }
-    r.bye = null; // set below for 5-round
+    if(r.matches.length > matchesPerRound) r.matches = r.matches.slice(0,matchesPerRound);
+    while(r.matches.length < matchesPerRound){ r.matches.push({ a:null, b:null, aScore:'', bScore:'', winnerId:null, diff:0, played:false }); }
+    r.bye = null; // set below if we include a bye selector row
   });
 
-  if(roundCount === 5){
-    state.schedule.forEach(function(r){
+  if (includeBye) {
+  state.schedule.forEach(function(r){
+    var hasByeRow = r.matches.some(function(m){ return m.isBye; });
+    if (!hasByeRow) {
       r.matches.push({ isBye:true, a:'BYE', b:'BYE', aScore:'', bScore:'', winnerId:null, diff:0, played:true });
-      r.bye = { a: null, b: null }; // store which two teams rest
-    });
-  }
+      // Leave r.bye as-is (null in manual/test paths) so selectors start empty
+      if (!r.bye) r.bye = { a: null, b: null };
+    }
+  });
+}
 
-  state.teams.forEach(function(t){ t.wins=0; t.diff=0; });
+
+    state.teams.forEach(function(t){ t.wins=0; t.diff=0; });
   state.standings = []; state.rankings = [];
   renderSchedule();
   renderStandings();
@@ -349,13 +402,23 @@ function createSchedule(roundCount){
   persist();
 }
 
+
 function renderSchedule(){
   var holder = el('#poolSchedule'); holder.innerHTML='';
   if(state.schedule.length===0) return;
+
   state.schedule.forEach(function(r){
+    // Create the round card FIRST, then add anything inside it
     var wrap = create('div', { class:'card', id:'round-'+r.round });
     wrap.appendChild(create('h3', {}, 'Round ' + r.round));
 
+    // Optional hint if two bye teams are already selected
+    if (r.bye && r.bye.a && r.bye.b) {
+      var byeHint = create('div', { class:'tiny muted' }, 'Byes: '+teamName(r.bye.a)+' & '+teamName(r.bye.b));
+      wrap.appendChild(byeHint);
+    }
+
+    // Render each match row
     r.matches.forEach(function(m, idx){
       var row = create('div', { class:'match', id:'match-'+r.round+'-'+idx });
 
@@ -397,13 +460,16 @@ function renderSchedule(){
       wrap.appendChild(row);
     });
 
+    // Per-round save button
     var saveRoundBtn = create('button', { id:'saveRound-'+r.round }, 'Save Round ' + r.round);
     saveRoundBtn.addEventListener('click', function(){ saveRound(r.round); persist(); });
     wrap.appendChild(saveRoundBtn);
 
+    // Finally, attach the whole round card to the page
     holder.appendChild(wrap);
   });
 }
+
 
 function pairKey(a,b){ if(a==='BYE' || b==='BYE') return null; var x = typeof a==='number'? a : parseInt(a,10); var y = typeof b==='number'? b : parseInt(b,10); var p = x<y? x:y; var q = x<y? y:x; return String(p)+'-'+String(q); }
 function seenPairsBefore(roundNo){
@@ -718,7 +784,7 @@ document.addEventListener('DOMContentLoaded', function(){
   });
 
   // Pool controls
-  el('#makeSchedule').addEventListener('click', function(){ var rounds=parseInt(el('#roundCount').value,10); createSchedule(rounds); });
+  el('#makeSchedule').addEventListener('click', function(){ createSchedule(); });
   el('#resetSchedule').addEventListener('click', function(){ state.schedule=[]; state.standings=[]; state.rankings=[]; el('#poolSchedule').innerHTML=''; el('#standings').innerHTML=''; el('#finalizePool').disabled=true; el('#buildBracket').disabled=true; persist(); });
   el('#finalizePool').addEventListener('click', finalizePool);
 
@@ -775,10 +841,10 @@ function runTests(){
   var byeA = el('#byeA-1'); var byeB = el('#byeB-1');
   if(byeA && byeB){
     byeA.value = String(state.teams[0].id); byeB.value = String(state.teams[0].id);
-    var blocked=false; var tempAlert=window.alert; window.alert=function(m){ if(String(m).includes('must be different')) blocked=true; };
+    var blocked=false; const originalAlert=window.alert; window.alert=function(m){ if(String(m).includes('must be different')) blocked=true; };
     var idx0 = state.schedule[0].matches.findIndex(function(m){return !m.isBye;});
     el('#aScore-1-'+idx0).value='21'; el('#bScore-1-'+idx0).value='19';
-    saveRound(1); window.alert=tempAlert;
+    saveRound(1); window.alert=originalAlert;
     logResult('Bye selection blocks when the same team is chosen twice', blocked===true);
   } else {
     logResult('Skipped bye-same-team test (not in 5-round mode)', true);
@@ -793,17 +859,16 @@ function runTests(){
   }
 
   // Finalize must fail while unsaved matches remain
-  var finalizeBlocked=false;
-  var originalAlertX = window.alert;
+  var finalizeBlocked=false; const originalAlertX = window.alert;
   window.alert = function(msg){ if(String(msg).includes('unsaved match')) finalizeBlocked=true; };
   finalizePool(); window.alert = originalAlertX;
   logResult('Finalize blocked when unsaved matches remain', finalizeBlocked===true);
 
-  // Bye uniqueness across rounds
+       // Bye uniqueness across rounds
   if(state.schedule.length===5){
     el('#byeA-2').value = String(state.teams[0].id);
     el('#byeB-2').value = String(state.teams[2].id);
-    var blocked2=false; var prevAlert = window.alert; window.alert=function(m){ if(String(m).includes('only receive one bye')) blocked2=true; };
+    var blocked2=false; const prevAlert = window.alert; window.alert=function(m){ if(String(m).includes('only receive one bye')) blocked2=true; };
     var j0 = state.schedule[1].matches.findIndex(function(m){return !m.isBye;});
     el('#aScore-2-'+j0).value='21'; el('#bScore-2-'+j0).value='19';
     saveRound(2); window.alert=prevAlert;
@@ -828,45 +893,25 @@ function runTests(){
   fill(2,1,state.teams[2].id,state.teams[3].id);
   fill(2,2,state.teams[4].id,state.teams[5].id);
   fill(2,3,state.teams[6].id,state.teams[7].id);
-  var rematchBlocked=false; 
-  var prevAlert2 = window.alert; 
-  window.alert=function(m){ if(String(m).includes('Rematch detected')) rematchBlocked=true; };
-  saveRound(2); 
-  window.alert=prevAlert2;
+  var rematchBlocked=false; const prevAlert2 = window.alert; window.alert=function(m){ if(String(m).includes('Rematch detected')) rematchBlocked=true; };
+  saveRound(2); window.alert=prevAlert2;
   logResult('Rematch prevention enforced across rounds', rematchBlocked===true);
 
   // Reset to auto-schedule so we can complete bracket tests cleanly
-  resetAll(); 
-  ['A','B','C','D','E','F','G','H','I','J'].forEach(function(n){ addTeam(n); });
-  el('#manualMode').checked = false; 
-  createSchedule(4);
-
+  resetAll(); ['A','B','C','D','E','F','G','H','I','J'].forEach(function(n){addTeam(n);});
+  el('#manualMode').checked = false; createSchedule(4);
   // Save all rounds with simple scores
   state.schedule.forEach(function(r){
     r.matches.forEach(function(m, mi){
-      if(m.isBye) return; 
-      el('#aScore-'+r.round+'-'+mi).value='21'; 
-      el('#bScore-'+r.round+'-'+mi).value='19';
+      if(m.isBye) return; el('#aScore-'+r.round+'-'+mi).value='21'; el('#bScore-'+r.round+'-'+mi).value='19';
     });
     saveRound(r.round);
   });
-
-  finalizePool(); 
-  buildBracketFromRankings();
-
-  // Advance play-ins, quarters, semis with simple scores
-  function simpleAdvance(list, key){
-    list.forEach(function(mm, i){ 
-      if(mm.winner) return; 
-      recordBracketScore(key, i, 21, 19); 
-    });
-  }
-  simpleAdvance(state.bracket.playins,'playins'); 
-  simpleAdvance(state.bracket.quarters,'quarters'); 
-  simpleAdvance(state.bracket.semis,'semis');
+  finalizePool(); buildBracketFromRankings();
+  function simpleAdvance(list, key){ list.forEach(function(mm, i){ if(mm.winner) return; recordBracketScore(key, i, 21, 19); }); }
+  simpleAdvance(state.bracket.playins,'playins'); simpleAdvance(state.bracket.quarters,'quarters'); simpleAdvance(state.bracket.semis,'semis');
   renderBracket();
-
-  // Final best-of-3: set scores (2-0)
+  // Final best-of-3: 2-0
   var finalCol = el('#bracket');
   var inputs = finalCol.querySelectorAll('.bracket-col:last-child input');
   inputs[0].value='25'; inputs[1].value='22'; // Set 1
